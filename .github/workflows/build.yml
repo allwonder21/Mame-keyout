@@ -5,56 +5,94 @@ on:
     inputs:
       ref:
         description: "MAME branch or tag to build"
-        default: "master"
+        required: true
+        default: "mame0289"
+
+permissions:
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 240
+
     defaults:
       run:
         shell: msys2 {0}
+
     steps:
-    - uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2.31.1
-      with:
-        msystem: UCRT64
-        install: git make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-llvm mingw-w64-ucrt-x86_64-libc++ mingw-w64-ucrt-x86_64-sdl3
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c
+        with:
+          msystem: UCRT64
+          install: git make mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-python mingw-w64-ucrt-x86_64-lld mingw-w64-ucrt-x86_64-llvm mingw-w64-ucrt-x86_64-libc++ mingw-w64-ucrt-x86_64-sdl3
 
-    - uses: actions/checkout@v4
-      with:
-        repository: mamedev/mame
-        ref: ${{ inputs.ref }}
-        fetch-depth: 0
+      - name: Check out MAME
+        uses: actions/checkout@v4
+        with:
+          repository: mamedev/mame
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
 
-    - name: Add Key Out (W) to fb2010 / fb2010a
-      run: |
-        git config --global --add safe.directory '*'
-        sed -i '/INPUT_PORTS_START( fb2010 )/,/INPUT_PORTS_END/ s|PORT_BIT( 0x10, IP_ACTIVE_LOW, IPT_UNKNOWN )  // unused keyout?|PORT_BIT( 0x10, IP_ACTIVE_LOW, IPT_GAMBLE_KEYOUT ) PORT_NAME("Key Out / Attendant")|' src/mame/igs/goldstar.cpp
-        git diff
-        if git diff --quiet; then echo "ERROR: patch did not apply (MAME source may have changed)"; exit 1; fi
+      - name: Add Key Out W to fb2010 and fb2010a
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
 
-    - name: Build (goldstar driver only)
-      env:
-        OVERRIDE_AR: "llvm-ar"
-        OVERRIDE_CC: "gcc"
-        OVERRIDE_CXX: "g++"
-        ARCHOPTS: "-fuse-ld=lld"
-        USE_SDL3: 1
-        SOURCES: src/mame/igs/goldstar.cpp
-        REGENIE: 1
-      run: make -j4
+          path = Path("src/mame/igs/goldstar.cpp")
+          text = path.read_text(encoding="utf-8")
 
-    - name: Check
-      run: |
-        ls -la *.exe
-        ./mame.exe -listfull fb2010 fb2010a
+          start = text.index("INPUT_PORTS_START( fb2010 )")
+          end = text.index("INPUT_PORTS_END", start)
 
-    - name: Validate (informational)
-      continue-on-error: true
-      run: ./mame.exe -validate
+          block = text[start:end]
 
-    - uses: actions/upload-artifact@v4
-      with:
-        name: mame-fb2010-keyout
-        path: mame.exe
-        if-no-files-found: error
+          pattern = r'PORT_BIT\(\s*0x10,\s*IP_ACTIVE_LOW,\s*IPT_UNKNOWN\s*\)\s*(?://\s*unused keyout\?)?'
+
+          replacement = 'PORT_BIT( 0x10, IP_ACTIVE_LOW, IPT_GAMBLE_KEYOUT ) PORT_CODE(KEYCODE_W) PORT_NAME("Key Out / Attendant")'
+
+          new_block, count = re.subn(
+              pattern,
+              replacement,
+              block,
+              count=1
+          )
+
+          if count != 1:
+              raise SystemExit(
+                  f"ERROR: expected exactly 1 fb2010 keyout line, changed {count}"
+              )
+
+          text = text[:start] + new_block + text[end:]
+          path.write_text(text, encoding="utf-8")
+
+          print("PATCH SUCCESS")
+          print(replacement)
+          PY
+
+          git diff -- src/mame/igs/goldstar.cpp
+
+      - name: Build goldstar MAME
+        env:
+          OVERRIDE_AR: "llvm-ar"
+          OVERRIDE_CC: "gcc"
+          OVERRIDE_CXX: "g++"
+          ARCHOPTS: "-fuse-ld=lld"
+          USE_SDL3: 1
+          SOURCES: src/mame/igs/goldstar.cpp
+          REGENIE: 1
+        run: |
+          make -j3
+
+      - name: Check build
+        run: |
+          ls -la *.exe
+          ./mame.exe -listfull fb2010 fb2010a nfb96
+
+      - name: Upload MAME EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: mame-fb2010-keyout
+          path: mame.exe
+          if-no-files-found: error
